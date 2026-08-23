@@ -1,0 +1,8 @@
+{
+  "name": "小紅書",
+  "version": "1.0.0",
+  "description": "偷看 TA 的小紅書",
+  "author": "予佟",
+  "icon": "auto_stories",
+  "entry": "plugin.js"
+}
