@@ -1,8 +1,15 @@
 {
+  "id": "roche-xiaohongshu",
   "name": "小紅書",
   "version": "1.0.0",
-  "description": "偷看 TA 的小紅書",
+  "description": "偷看 TA 的小紅書：AI 生成角色的小紅書筆記，瀑布流發現頁 + 個人主頁 + 貼文詳情",
   "author": "予佟",
-  "icon": "auto_stories",
-  "entry": "plugin.js"
+  "entry": "plugin.js",
+  "hash": "",
+  "permissions": [
+    "storage",
+    "ui",
+    "character:read",
+    "persona:read"
+  ]
 }
