@@ -52,6 +52,7 @@
         modelFetchMsg: '',
         modelFetchErr: false,
         lastRawResponse: '',
+        lastError: '',
         imported: null,   // { name, handle, avatar, coreSummary, factMemories, recentMessages, importedAt }
         importMsg: '',
         importErr: false,
@@ -236,28 +237,45 @@ ${context}
 直接回覆 JSON 陣列，不要有任何其他文字或markdown符號。`;
         try {
           const raw = await callAPI(prompt);
-          S.lastRawResponse = raw; // 保留原始回應方便除錯
+          S.lastRawResponse = raw;
           if (!raw || !raw.trim()) {
             throw new Error('API 回應是空的，請檢查 Endpoint / API Key / Model 是否正確');
           }
           let parsed;
+          // 寬容解析：先清 markdown fence，再嘗試直接 parse，失敗就從文本中提取 JSON 陣列
+          const cleaned = raw.replace(/```json\s*/gi,'').replace(/```\s*/g,'').trim();
           try {
-            const cleaned = raw.replace(/```json\n?|```\n?/g,'').trim();
             parsed = JSON.parse(cleaned);
-          } catch (parseErr) {
-            // 解析失敗時明確告知，不再靜默用假資料頂替
+          } catch (_) {
+            // 嘗試從回應中找到 [ ... ] JSON 陣列
+            const match = cleaned.match(/\[[\s\S]*\]/);
+            if (match) {
+              try { parsed = JSON.parse(match[0]); } catch (__) {}
+            }
+            // 再試 { ... } 單一物件
+            if (!parsed) {
+              const objMatch = cleaned.match(/\{[\s\S]*\}/);
+              if (objMatch) {
+                try { parsed = JSON.parse(objMatch[0]); } catch (___) {}
+              }
+            }
+          }
+          if (!parsed) {
             console.error('[小紅書] JSON 解析失敗，原始回應：', raw);
-            throw new Error('AI 回應的格式不是預期的 JSON，可能是 model 不支援或回應被截斷。原始回應前 100 字：「' + raw.slice(0,100) + '」');
+            throw new Error('AI 回應無法解析為 JSON。回應前 120 字：「' + raw.slice(0,120) + '…」');
           }
           if (!Array.isArray(parsed)) parsed = [parsed];
+          // 驗證至少有一篇有 title
           if (!parsed.length || !parsed[0] || !parsed[0].title) {
-            throw new Error('AI 回應的資料結構不對，缺少 title 欄位');
+            throw new Error('AI 回應的資料結構不對（缺少 title）。回應前 120 字：「' + raw.slice(0,120) + '…」');
           }
           const news = parsed.map(p=>({...p,author:name,gradient:rg(),avatarGrad:'linear-gradient(135deg,#667eea,#764ba2)',coverH:rh(),likes:rl(),comments:rc()}));
           S.posts = [...news,...S.posts]; savePosts();
+          S.lastError = '';
           toast('✨ 生成了 '+news.length+' 篇筆記');
         } catch(e) {
-          toast('生成失敗：'+e.message);
+          S.lastError = e.message;
+          toast('⚠ 生成失敗');
           console.error('[小紅書] 生成失敗：', e);
         }
         finally { S.generating=false; render(); }
@@ -372,6 +390,16 @@ ${context}
       function renderDiscover() {
         let h = `<div class="xhs-search"><div class="xhs-search-inner">${icons.search}<span>搜尋小紅書</span></div></div>`;
         h += `<div class="xhs-cats">${['推薦','穿搭','美食','旅行','日常','攝影'].map((t,i)=>`<span class="${i===0?'active':''}">${t}</span>`).join('')}</div>`;
+
+        // 錯誤訊息持久顯示（不只是 toast）
+        if (S.lastError) {
+          h += `<div style="margin:8px 12px;padding:10px 12px;border-radius:10px;background:#FFF5F5;border:1px solid #FFDDDD;font-size:12px;color:#CC3333;line-height:1.5">⚠ ${esc(S.lastError)}</div>`;
+        }
+        // 提示匯入狀態
+        if (!S.imported && !S.posts.length) {
+          h += `<div style="margin:0 12px 8px;padding:8px 12px;border-radius:8px;background:#FFF8E8;border:1px solid #F0E0B0;font-size:11px;color:#996600;line-height:1.4">💡 尚未匯入角色資料。點左上齒輪 → 匯入角色卡或聊天備份，生成的筆記才會貼合角色個性。</div>`;
+        }
+
         if (!S.posts.length) {
           h += `<div class="xhs-empty"><div class="icon">🌿</div><p>還沒有內容，讓 AI 幫角色生成一些吧</p><button class="xhs-btn" data-act="generate" ${S.generating?'disabled':''}>${S.generating?'⏳ 生成中...':'✨ 生成筆記'}</button></div>`;
         } else {
@@ -515,7 +543,7 @@ ${context}
   window.RochePlugin.register({
     id: 'roche-xiaohongshu',
     name: '小紅書',
-    version: '2.0.2',
+    version: '3.0.0',
     description: '偷看 TA 的小紅書',
     author: '予佟',
     apps: [xhsApp]
