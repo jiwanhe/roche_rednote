@@ -85,6 +85,9 @@
         imported: null, importMsg:'', importErr:false,
         profileTab: 'works',
         rocheAPI: _rocheAPI,
+        probeResults: null,  // API 探測結果
+        probing: false,
+        autoFetching: false,
       };
 
       // ── Storage ──
@@ -253,19 +256,139 @@
         return ctx;
       }
 
+      // ── 探測 Roche API 回傳格式 ──
+      async function probeRocheAPI(){
+        S.probing=true; render();
+        const results = {};
+        const tryCall = async (label, fn) => {
+          try { const r = await fn(); results[label] = JSON.stringify(r, null, 2).slice(0, 1500); }
+          catch(e) { results[label] = '❌ ' + e.message; }
+        };
+        // character
+        await tryCall('character.list()', () => roche.character.list());
+        await tryCall('character.get()', () => roche.character.get());
+        // conversation
+        await tryCall('conversation.list()', () => roche.conversation.list());
+        await tryCall('conversation.get()', () => roche.conversation.get());
+        // memory - try without args first, then with conversation context
+        await tryCall('memory.getShortTerm()', () => roche.memory.getShortTerm());
+        await tryCall('memory.getLongTerm()', () => roche.memory.getLongTerm());
+        // persona
+        await tryCall('persona.getActiveUserPersona()', () => roche.persona.getActiveUserPersona());
+        // ai.chat - just test with a tiny prompt
+        await tryCall('ai.chat({...})', () => roche.ai.chat({ messages:[{role:'user',content:'說「測試成功」兩個字'}], max_tokens:20 }));
+        S.probeResults = results;
+        S.probing = false;
+        console.log('[小紅書] API 探測結果：', results);
+        render();
+      }
+
+      // ── 自動抓取角色資料 ──
+      async function autoFetchCharData(){
+        S.autoFetching=true; render();
+        try {
+          const imported = { importedAt: Date.now(), persona:'', bio:'', coreSummary:'', factMemories:[], recentMessages:[], name:'', handle:'' };
+          let charData = null;
+
+          // 1. 嘗試抓角色列表，找到當前角色
+          try {
+            const chars = await roche.character.list();
+            if (chars && chars.length) {
+              // 如果有指定角色名稱，找匹配的；否則用第一個
+              const target = S.cfg.charName || '';
+              charData = target ? chars.find(c => (c.name||c.handle||'') === target) || chars[0] : chars[0];
+            }
+          } catch(_){}
+
+          // 2. 如果 list 拿到了角色，嘗試 get 取完整資料
+          if (charData) {
+            const charId = charData.id || charData.contactId || charData.handle;
+            if (charId) {
+              try {
+                const full = await roche.character.get(charId);
+                if (full) charData = full;
+              } catch(_){}
+            }
+            imported.name = charData.name || charData.handle || '角色';
+            imported.handle = charData.handle || charData.name || '';
+            imported.persona = charData.persona || charData.description || charData.systemPrompt || '';
+            imported.bio = charData.bio || charData.greeting || '';
+          }
+
+          // 3. 抓長期記憶
+          try {
+            const ltm = await roche.memory.getLongTerm();
+            if (ltm) {
+              // 可能是 { summary, factMemories } 或直接是陣列
+              if (typeof ltm === 'string') {
+                imported.coreSummary = ltm;
+              } else if (ltm.summary) {
+                imported.coreSummary = ltm.summary;
+              }
+              if (ltm.factMemories && Array.isArray(ltm.factMemories)) {
+                imported.factMemories = ltm.factMemories.slice(0,8).map(f => f.summaryText || f.action || String(f)).filter(Boolean);
+              } else if (Array.isArray(ltm)) {
+                imported.factMemories = ltm.slice(0,8).map(f => typeof f === 'string' ? f : (f.summaryText || f.action || JSON.stringify(f).slice(0,120))).filter(Boolean);
+              }
+            }
+          } catch(_){}
+
+          // 4. 抓短期記憶（近期對話）
+          try {
+            const stm = await roche.memory.getShortTerm();
+            if (stm && Array.isArray(stm)) {
+              imported.recentMessages = stm
+                .filter(m => !m.isMe && (m.text || m.content))
+                .slice(-20)
+                .map(m => m.text || m.content || '');
+            } else if (typeof stm === 'string') {
+              imported.coreSummary = imported.coreSummary || stm;
+            }
+          } catch(_){}
+
+          // 5. 合併到 S.imported
+          if (imported.name || imported.persona || imported.coreSummary || imported.factMemories.length) {
+            S.imported = imported;
+            await saveImported();
+            if (!S.cfg.charName && imported.name) S.cfg.charName = imported.name;
+            toast('✨ 自動抓取成功：' + (imported.name || '角色'));
+            S.importMsg = `已自動抓取「${imported.name}」：角色卡 ${imported.persona?'✓':'✕'}　記憶 ${imported.factMemories.length}筆　語氣 ${imported.recentMessages.length}則`;
+            S.importErr = false;
+          } else {
+            toast('⚠ 沒有抓到資料，請確認角色是否存在');
+            S.importMsg = '自動抓取未取得資料，可能需要先開啟一個角色對話';
+            S.importErr = true;
+          }
+        } catch(e) {
+          toast('⚠ 抓取失敗：' + e.message);
+          S.importMsg = '自動抓取失敗：' + e.message;
+          S.importErr = true;
+        }
+        S.autoFetching = false;
+        render();
+      }
+
       // ── API ──
       async function callAPI(prompt, sysMsg){
         const msgs = [];
         if(sysMsg) msgs.push({role:'system',content:sysMsg});
         msgs.push({role:'user',content:prompt});
         if(S.cfg.mode==='roche'){
-          const h={'Content-Type':'application/json'};
-          if(S.cfg.apiKey)h['Authorization']='Bearer '+S.cfg.apiKey;
-          const body={model:S.cfg.model||'claude-sonnet-4-6',max_tokens:8000,messages:msgs};
-          const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:h,body:JSON.stringify(body)});
-          const data=await res.json().catch(()=>({}));
-          if(!res.ok)throw new Error('API 錯誤 ('+res.status+')：'+(data.error?.message||data.message||JSON.stringify(data).slice(0,200)));
-          return(data.content?.map(b=>b.text||'').join(''))||'';
+          // 使用 Roche 內建的 AI 呼叫，不需要自己填 API key
+          try {
+            const result = await roche.ai.chat({ messages: msgs, max_tokens: 8000 });
+            // result 可能是字串、物件、或帶 content 的回應
+            if (typeof result === 'string') return result;
+            if (result && result.content) {
+              if (Array.isArray(result.content)) return result.content.map(b=>b.text||'').join('');
+              return String(result.content);
+            }
+            if (result && result.text) return result.text;
+            if (result && result.choices) return result.choices[0]?.message?.content || '';
+            return JSON.stringify(result);
+          } catch(e) {
+            throw new Error('roche.ai.chat() 失敗：' + e.message);
+          }
         }
         const base=(S.cfg.endpoint||'').replace(/\/+$/,'');
         if(!base)throw new Error('尚未設定 Endpoint');
@@ -462,8 +585,17 @@ ${ctx}
         h+=`<button class="xhs-s-save" data-act="clear-all" style="background:#fff;color:${RED};border:1px solid ${RED};margin-top:8px">🗑️ 清除所有內容</button>`;
         // Roche API 結構顯示
         if(S.rocheAPI&&S.rocheAPI.length){
-          h+=`<label class="xhs-s-label" style="margin-top:16px;padding-top:12px;border-top:1px solid ${BD}">🔍 Roche 插件 API 結構</label>`;
-          h+=`<div style="font-size:11px;font-family:monospace;color:${T2};background:#F5F5F5;border:1px solid ${BD};border-radius:10px;padding:10px;max-height:200px;overflow-y:auto;line-height:1.6;white-space:pre-wrap">${S.rocheAPI.map(l=>esc(l)).join('\n')}</div>`;
+          h+=`<label class="xhs-s-label" style="margin-top:16px;padding-top:12px;border-top:1px solid ${BD}">🔍 Roche 插件 API</label>`;
+          h+=`<div style="font-size:11px;font-family:monospace;color:${T2};background:#F5F5F5;border:1px solid ${BD};border-radius:10px;padding:10px;max-height:150px;overflow-y:auto;line-height:1.6;white-space:pre-wrap">${S.rocheAPI.map(l=>esc(l)).join('\n')}</div>`;
+          h+=`<button data-act="probe-api" class="xhs-s-save" style="background:#333;margin-top:8px" ${S.probing?'disabled':''}>${S.probing?'⏳ 探測中...':'🧪 探測 API 回傳格式'}</button>`;
+          h+=`<button data-act="auto-fetch" class="xhs-s-save" style="background:#2d8a5f;margin-top:8px" ${S.autoFetching?'disabled':''}>${S.autoFetching?'⏳ 抓取中...':'🚀 自動抓取角色資料'}</button>`;
+        }
+        if(S.probeResults){
+          h+=`<label class="xhs-s-label">🧪 API 探測結果（貼給開發者）</label>`;
+          const entries=Object.entries(S.probeResults);
+          for(const [k,v] of entries){
+            h+=`<div style="margin-top:6px"><strong style="font-size:11px;color:${T1}">${esc(k)}</strong><div style="font-size:10px;font-family:monospace;color:${T2};background:#F5F5F5;border:1px solid ${BD};border-radius:8px;padding:8px;max-height:120px;overflow-y:auto;white-space:pre-wrap;margin-top:2px">${esc(v)}</div></div>`;
+          }
         }
         h+=`</div></div>`;
         return h;
@@ -505,6 +637,8 @@ ${ctx}
         }
         else if(act==='clear-all'){S.feedPosts=[];S.myPosts=[];S.savedIds={};S.liked={};saveFeed();saveMine();saveSaved();S.showSettings=false;toast('已清除所有內容');render();}
         else if(act==='clear-imported'){S.imported=null;saveImported();S.importMsg='已清除';S.importErr=false;render();}
+        else if(act==='probe-api'){probeRocheAPI();}
+        else if(act==='auto-fetch'){autoFetchCharData();}
       }
       function handleChange(e){
         const el=e.target;
@@ -542,7 +676,7 @@ ${ctx}
   };
 
   window.RochePlugin.register({
-    id:'roche-xiaohongshu',name:'小紅書',version:'3.0.0',
+    id:'roche-xiaohongshu',name:'小紅書',version:'2.1.1',
     description:'偷看 TA 的小紅書',author:'予佟',
     apps:[xhsApp]
   });
