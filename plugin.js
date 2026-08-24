@@ -47,15 +47,24 @@
         liked: {},
         cfg: { mode: 'custom', endpoint: '', apiKey: '', model: '', charName: '', systemPrompt: '' },
         char: { name: '角色', uid: '16601803', bio: '', following: 42, followers: 1205, likes: '8.8w' },
+        models: [],
+        fetchingModels: false,
+        modelFetchMsg: '',
+        modelFetchErr: false,
+        imported: null,   // { name, handle, avatar, coreSummary, factMemories, recentMessages, importedAt }
+        importMsg: '',
+        importErr: false,
       };
 
       // ── roche.storage 讀取 ──
       try { const saved = await roche.storage.get('xhs_config'); if (saved) Object.assign(S.cfg, JSON.parse(saved)); } catch (_) {}
       try { const sp = await roche.storage.get('xhs_posts'); if (sp) S.posts = JSON.parse(sp); } catch (_) {}
+      try { const im = await roche.storage.get('xhs_imported'); if (im) S.imported = JSON.parse(im); } catch (_) {}
 
       const saveCfg = () => roche.storage.set('xhs_config', JSON.stringify(S.cfg));
       const savePosts = () => roche.storage.set('xhs_posts', JSON.stringify(S.posts));
-      const charName = () => S.cfg.charName || S.char.name;
+      const saveImported = () => roche.storage.set('xhs_imported', JSON.stringify(S.imported));
+      const charName = () => S.cfg.charName || (S.imported && S.imported.name) || S.char.name;
 
       // ── 樣式 ──
       const style = document.createElement('style');
@@ -178,9 +187,23 @@
         if (S.generating) return;
         S.generating = true; render();
         const name = charName();
-        const prompt = `你是「${name}」，一個在小紅書上發布內容的角色。${S.cfg.systemPrompt?'\n角色設定：'+S.cfg.systemPrompt:''}
+        const im = S.imported;
 
-請以這個角色的身份，生成 3 篇小紅書風格的筆記。每篇筆記要有：
+        let context = '';
+        if (im) {
+          if (im.persona) context += `\n【角色人設（最高優先，含外貌、性格、說話風格與行為限制）】\n${im.persona}\n`;
+          if (im.coreSummary) context += `\n【角色關係與近況摘要】\n${im.coreSummary}\n`;
+          if (im.factMemories && im.factMemories.length) {
+            context += `\n【近期發生的事（由近到遠）】\n${im.factMemories.map((f,i)=>`${i+1}. ${f}`).join('\n')}\n`;
+          }
+          if (im.recentMessages && im.recentMessages.length) {
+            context += `\n【角色說話語氣參考（近期原話片段）】\n${im.recentMessages.slice(-12).map(t=>'- '+t).join('\n')}\n`;
+          }
+        }
+
+        const prompt = `你是「${name}」，一個在小紅書上發布內容的角色。${S.cfg.systemPrompt?'\n角色設定：'+S.cfg.systemPrompt:''}
+${context}
+請以這個角色的身份，生成 3 篇小紅書風格的筆記，內容要符合上面提供的個性、近期經歷和語氣（如果有的話），像是這個角色真的會在自己小紅書上發的東西——可以是近期經歷的側寫、心情碎念、生活分享，不需要直接複述事件，而是用角色的口吻自然帶出。每篇筆記要有：
 - title: 標題（吸引人的小紅書標題風格，可以用emoji）
 - content: 正文內容（200-400字，小紅書風格，分段、有emoji）
 - tags: 標籤陣列（3-5個）
@@ -205,12 +228,102 @@
         finally { S.generating=false; render(); }
       }
 
+      // ── 解析 Roche 匯出檔（自動判斷：角色卡 or 聊天備份）──
+      function parseImportFile(raw) {
+        const data = JSON.parse(raw);
+
+        // 角色卡格式：{ type: 'roche_contact_card', contact: {...} }
+        if (data.type === 'roche_contact_card' && data.contact) {
+          const c = data.contact;
+          return {
+            kind: 'card',
+            name: c.name || c.handle || '角色',
+            handle: c.handle || c.name || '',
+            persona: c.persona || '',
+            bio: c.bio || '',
+          };
+        }
+
+        // 聊天備份格式：{ conversation, messages, coreMemory, factMemories }
+        if (data.conversation && data.messages) {
+          const conv = data.conversation;
+          const core = (data.coreMemory && data.coreMemory.summary) || '';
+          const facts = (data.factMemories || [])
+            .slice()
+            .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+            .slice(0, 8)
+            .map(f => f.summaryText || f.action || '')
+            .filter(Boolean);
+          const recent = (data.messages || [])
+            .slice(-60)
+            .filter(m => !m.isMe && m.text)
+            .slice(-20)
+            .map(m => m.text);
+          return {
+            kind: 'backup',
+            name: conv.name || conv.handle || '角色',
+            handle: conv.handle || conv.name || '',
+            coreSummary: core,
+            factMemories: facts,
+            recentMessages: recent,
+          };
+        }
+
+        throw new Error('無法辨識的檔案格式（需要角色卡或聊天備份 JSON）');
+      }
+
+      // 合併角色卡 + 聊天備份 為單一 imported 物件；同名角色的資料互補疊加，不同名則以最新匯入為準
+      function mergeImported(prev, incoming) {
+        const base = (prev && prev.name === incoming.name) ? { ...prev } : {
+          name: incoming.name, handle: incoming.handle,
+          persona: '', bio: '', coreSummary: '', factMemories: [], recentMessages: [],
+        };
+        if (incoming.kind === 'card') {
+          base.persona = incoming.persona || base.persona;
+          base.bio = incoming.bio || base.bio;
+        } else {
+          base.coreSummary = incoming.coreSummary || base.coreSummary;
+          if (incoming.factMemories && incoming.factMemories.length) base.factMemories = incoming.factMemories;
+          if (incoming.recentMessages && incoming.recentMessages.length) base.recentMessages = incoming.recentMessages;
+        }
+        base.name = incoming.name || base.name;
+        base.handle = incoming.handle || base.handle;
+        base.importedAt = Date.now();
+        return base;
+      }
+
+      // ── 拉取模型清單 ──
+      async function fetchModels() {
+        const ep = (S.cfg.endpoint || '').replace(/\/+$/, '');
+        if (!ep) { S.modelFetchMsg = '請先填寫 Endpoint'; S.modelFetchErr = true; render(); return; }
+        S.fetchingModels = true; S.modelFetchMsg = ''; render();
+        try {
+          const headers = {};
+          if (S.cfg.apiKey) headers['Authorization'] = 'Bearer ' + S.cfg.apiKey;
+          const res = await fetch(ep + '/models', { headers });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+          const list = (data.data || data.models || []).map(m => m.id || m.name || m).filter(Boolean);
+          if (!list.length) throw new Error('沒有找到可用模型');
+          S.models = list;
+          if (!S.cfg.model || !list.includes(S.cfg.model)) S.cfg.model = list[0];
+          S.modelFetchMsg = `已取得 ${list.length} 個模型`;
+          S.modelFetchErr = false;
+        } catch (e) {
+          S.modelFetchMsg = '拉取失敗：' + e.message;
+          S.modelFetchErr = true;
+        } finally {
+          S.fetchingModels = false;
+          render();
+        }
+      }
+
       // ── 渲染 ──
       const root = document.createElement('div'); root.className='xhs-root'; container.appendChild(root);
 
       function render() {
         let h = '';
-        h += `<div class="xhs-hdr"><button class="xhs-hdr-btn" data-act="settings">${icons.settings}</button><span class="xhs-hdr-title">小紅書</span><button class="xhs-hdr-btn" data-act="generate" ${S.generating?'disabled':''}>${S.generating?'⏳':icons.refresh}</button></div>`;
+        h += `<div class="xhs-hdr"><button class="xhs-hdr-btn" data-act="exit-app" title="退出">${icons.back}</button><span class="xhs-hdr-title">小紅書</span><div style="display:flex;gap:2px"><button class="xhs-hdr-btn" data-act="settings">${icons.settings}</button><button class="xhs-hdr-btn" data-act="generate" ${S.generating?'disabled':''}>${S.generating?'⏳':icons.refresh}</button></div></div>`;
         h += `<div class="xhs-body">${S.view==='discover'?renderDiscover():renderProfile()}</div>`;
         h += `<div class="xhs-nav"><button class="xhs-nav-btn" data-act="nav-discover">${icons.home(S.view==='discover')}<span style="color:${S.view==='discover'?RED:T3}">首頁</span></button><button class="xhs-nav-btn">${icons.shop}<span>購物</span></button><button class="xhs-nav-plus" data-act="generate" ${S.generating?'disabled':''}>${icons.plus}</button><button class="xhs-nav-btn">${icons.mail}<span>消息</span></button><button class="xhs-nav-btn" data-act="nav-profile">${icons.user(S.view==='profile')}<span style="color:${S.view==='profile'?RED:T3}">我</span></button></div>`;
         if (S.detail) h += renderDetail(S.detail);
@@ -232,7 +345,8 @@
 
       function renderProfile() {
         const name = charName(), my = S.posts.filter(p=>p.author===name);
-        let h = `<div class="xhs-profile-hdr"><div class="xhs-avatar" style="background:linear-gradient(135deg,#667eea,#764ba2)">${name[0]||'?'}</div><div class="xhs-profile-name">${esc(name)}</div><span class="xhs-profile-uid">小紅書號：${S.char.uid}</span><div class="xhs-profile-stats"><div><div class="val">${S.char.following}</div><div class="lbl">關注</div></div><div><div class="val">${S.char.followers}</div><div class="lbl">粉絲</div></div><div><div class="val">${S.char.likes}</div><div class="lbl">獲讚與收藏</div></div></div><div class="xhs-profile-btns"><button class="xhs-follow-btn">關注</button><button class="xhs-msg-btn">💬</button></div><p class="xhs-profile-bio">${esc(S.cfg.systemPrompt?S.cfg.systemPrompt.slice(0,80):S.char.bio||'The silence is loud.')}</p></div>`;
+        const bioText = S.cfg.systemPrompt || (S.imported && (S.imported.bio || S.imported.persona || S.imported.coreSummary)) || S.char.bio || 'The silence is loud.';
+        let h = `<div class="xhs-profile-hdr"><div class="xhs-avatar" style="background:linear-gradient(135deg,#667eea,#764ba2)">${name[0]||'?'}</div><div class="xhs-profile-name">${esc(name)}</div><span class="xhs-profile-uid">小紅書號：${S.char.uid}</span><div class="xhs-profile-stats"><div><div class="val">${S.char.following}</div><div class="lbl">關注</div></div><div><div class="val">${S.char.followers}</div><div class="lbl">粉絲</div></div><div><div class="val">${S.char.likes}</div><div class="lbl">獲讚與收藏</div></div></div><div class="xhs-profile-btns"><button class="xhs-follow-btn">關注</button><button class="xhs-msg-btn">💬</button></div><p class="xhs-profile-bio">${esc(bioText.slice(0,90))}</p></div>`;
         h += `<div class="xhs-tabs"><div class="xhs-tab active">筆記</div><div class="xhs-tab">讚過</div></div>`;
         if (!my.length) {
           h += `<div class="xhs-empty"><div class="icon">📝</div><p>還沒有筆記</p><button class="xhs-btn" data-act="generate" ${S.generating?'disabled':''}>${S.generating?'生成中...':'✨ AI 生成筆記'}</button></div>`;
@@ -252,9 +366,32 @@
         let h = `<div class="xhs-settings-mask"><div class="xhs-settings"><div class="xhs-settings-hdr"><span>API 設定</span><button data-act="close-settings">✕</button></div>`;
         h += `<label class="xhs-s-label">API 來源</label><div class="xhs-s-modes"><button class="xhs-s-mode ${c.mode==='roche'?'active':''}" data-act="set-mode" data-mode="roche">Roche 內建</button><button class="xhs-s-mode ${c.mode==='custom'?'active':''}" data-act="set-mode" data-mode="custom">自訂 API</button></div>`;
         if (c.mode==='custom') {
-          h += `<label class="xhs-s-label">Endpoint</label><input class="xhs-s-input" data-field="endpoint" value="${esc(c.endpoint)}" placeholder="https://api.openai.com/v1/chat/completions"><label class="xhs-s-label">API Key</label><input class="xhs-s-input" data-field="apiKey" value="${esc(c.apiKey)}" type="password" placeholder="sk-..."><label class="xhs-s-label">Model</label><input class="xhs-s-input" data-field="model" value="${esc(c.model)}" placeholder="gpt-4o / claude-sonnet-4-6">`;
+          h += `<label class="xhs-s-label">Endpoint</label><input class="xhs-s-input" data-field="endpoint" value="${esc(c.endpoint)}" placeholder="https://api.example.com/v1（不含 /chat/completions）"><label class="xhs-s-label">API Key</label><input class="xhs-s-input" data-field="apiKey" value="${esc(c.apiKey)}" type="password" placeholder="sk-..."><label class="xhs-s-label">Model</label><div style="display:flex;gap:6px;align-items:center">${S.models.length?`<select class="xhs-s-input" data-field="model" style="flex:1">${S.models.map(m=>`<option value="${esc(m)}" ${m===c.model?'selected':''}>${esc(m)}</option>`).join('')}</select>`:`<input class="xhs-s-input" data-field="model" value="${esc(c.model)}" placeholder="先點右側拉取模型" style="flex:1">`}<button data-act="fetch-models" style="flex-shrink:0;padding:9px 12px;border-radius:10px;border:1px solid ${RED};background:${RED_L};color:${RED};font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap" ${S.fetchingModels?'disabled':''}>${S.fetchingModels?'⏳':'拉取模型'}</button></div>${S.modelFetchMsg?`<div style="font-size:11px;color:${S.modelFetchErr?RED:T2};margin-top:4px">${esc(S.modelFetchMsg)}</div>`:''}`;
         }
         h += `<label class="xhs-s-label">角色名稱</label><input class="xhs-s-input" data-field="charName" value="${esc(c.charName)}" placeholder="角色名"><label class="xhs-s-label">角色設定 / System Prompt（選填）</label><textarea class="xhs-s-input" data-field="systemPrompt" rows="4" placeholder="描述角色的人設、語氣、興趣等..." style="resize:vertical">${esc(c.systemPrompt)}</textarea>`;
+
+        // ── 匯入角色資料（備份 JSON）──
+        h += `<label class="xhs-s-label" style="margin-top:16px;padding-top:12px;border-top:1px solid ${BD}">匯入角色資料（Roche 備份 JSON）</label>`;
+        if (S.imported) {
+          const d = new Date(S.imported.importedAt);
+          const dstr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+          h += `<div style="font-size:12px;color:${T2};background:#FAFAFA;border:1px solid ${BD};border-radius:10px;padding:9px 12px;margin-top:4px">
+            已匯入：<strong>${esc(S.imported.name)}</strong>　·　角色卡 ${S.imported.persona ? '✓' : '✕'}　·　近況摘要 ${S.imported.coreSummary ? '✓' : '✕'}　·　近期記憶 ${(S.imported.factMemories||[]).length} 筆　·　語氣樣本 ${(S.imported.recentMessages||[]).length} 則<br>
+            <span style="color:${T3};font-size:11px">匯入時間：${dstr}</span>
+          </div>`;
+        } else {
+          h += `<div style="font-size:12px;color:${T3};margin-top:2px">尚未匯入。可匯入角色卡（含完整人設）和/或聊天備份（含近期記憶與語氣），兩者可分開匯入、自動合併。</div>`;
+        }
+        h += `<div style="display:flex;gap:6px;margin-top:8px">
+          <label style="flex:1;text-align:center;padding:9px 0;border-radius:10px;border:1px solid ${RED};background:${RED_L};color:${RED};font-size:12px;font-weight:600;cursor:pointer">
+            📂 選擇備份 JSON
+            <input type="file" accept=".json,application/json" data-act="import-file" style="display:none">
+          </label>
+          ${S.imported ? `<button data-act="clear-imported" style="flex-shrink:0;padding:9px 14px;border-radius:10px;border:1px solid ${BD};background:#fff;color:${T2};font-size:12px;cursor:pointer">清除</button>` : ''}
+        </div>`;
+        if (S.importMsg) h += `<div style="font-size:11px;color:${S.importErr?RED:'#2d8a5f'};margin-top:6px">${esc(S.importMsg)}</div>`;
+        h += `<div style="font-size:10.5px;color:${T3};margin-top:6px;line-height:1.5">角色卡：Roche → 該角色資料卡 → 匯出角色卡。聊天備份：該角色聊天設定 → 匯出備份。兩種檔案都只存在你自己裝置上（透過 roche.storage），不會上傳到任何地方。</div>`;
+
         h += `<button class="xhs-s-save" data-act="save-settings">儲存設定</button><button class="xhs-s-save" data-act="clear-posts" style="background:#fff;color:${RED};border:1px solid ${RED};margin-top:8px">🗑️ 清除所有筆記</button></div></div>`;
         return h;
       }
@@ -265,7 +402,13 @@
         const act = btn.dataset.act;
         if (act==='settings') { S.showSettings=true; render(); }
         else if (act==='close-settings') { S.showSettings=false; render(); }
+        else if (act==='exit-app') { if (roche.ui && roche.ui.closeApp) roche.ui.closeApp(); }
         else if (act==='generate') { generatePosts(); }
+        else if (act==='fetch-models') {
+          // 先把畫面上還沒儲存的 endpoint / apiKey 同步進 S.cfg，這樣拉取才會用到使用者剛輸入的值
+          root.querySelectorAll('.xhs-s-input[data-field]').forEach(el=>{ S.cfg[el.dataset.field]=el.value; });
+          fetchModels();
+        }
         else if (act==='nav-discover') { S.view='discover'; render(); }
         else if (act==='nav-profile') { S.view='profile'; render(); }
         else if (act==='open-post') { const idx=parseInt(btn.dataset.idx); if (!isNaN(idx)&&S.posts[idx]) { S.detail=S.posts[idx]; render(); } }
@@ -277,18 +420,54 @@
           saveCfg(); S.showSettings=false; toast('設定已儲存'); render();
         }
         else if (act==='clear-posts') { S.posts=[]; S.liked={}; savePosts(); S.showSettings=false; toast('已清除所有筆記'); render(); }
+        else if (act==='clear-imported') { S.imported=null; saveImported(); S.importMsg='已清除匯入的角色資料'; S.importErr=false; render(); }
       }
+
+      function handleChange(e) {
+        const el = e.target;
+        if (el.dataset.act === 'import-file') {
+          const file = el.files && el.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = async (ev) => {
+            try {
+              const incoming = parseImportFile(ev.target.result);
+              S.imported = mergeImported(S.imported, incoming);
+              await saveImported();
+              // 如果角色名稱欄位是空的，順便帶入
+              if (!S.cfg.charName) S.cfg.charName = S.imported.name;
+              const kindLabel = incoming.kind === 'card' ? '角色卡' : '聊天備份';
+              S.importMsg = `已匯入「${S.imported.name}」的${kindLabel}資料`;
+              S.importErr = false;
+              toast('✨ 角色資料匯入成功');
+            } catch (err) {
+              S.importMsg = '匯入失敗：' + err.message;
+              S.importErr = true;
+            }
+            render();
+          };
+          reader.onerror = () => { S.importMsg = '讀取檔案失敗'; S.importErr = true; render(); };
+          reader.readAsText(file);
+        }
+      }
+
       root.addEventListener('click', handleClick);
+      root.addEventListener('change', handleChange);
       render();
 
       // 儲存清理
       this._rootEl = root;
       this._styleEl = style;
       this._handler = handleClick;
+      this._changeHandler = handleChange;
     },
 
     async unmount(container) {
-      if (this._rootEl) { this._rootEl.removeEventListener('click', this._handler); this._rootEl.remove(); }
+      if (this._rootEl) {
+        this._rootEl.removeEventListener('click', this._handler);
+        this._rootEl.removeEventListener('change', this._changeHandler);
+        this._rootEl.remove();
+      }
       if (this._styleEl) this._styleEl.remove();
       container.replaceChildren();
     }
@@ -298,7 +477,7 @@
   window.RochePlugin.register({
     id: 'roche-xiaohongshu',
     name: '小紅書',
-    version: '2.0.0',
+    version: '2.0.1',
     description: '偷看 TA 的小紅書',
     author: '予佟',
     apps: [xhsApp]
