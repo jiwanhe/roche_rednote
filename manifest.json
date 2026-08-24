@@ -1,7 +1,7 @@
 {
   "id": "roche-xiaohongshu",
   "name": "小紅書",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "偷看 TA 的小紅書：AI 生成角色的小紅書筆記，瀑布流發現頁 + 個人主頁 + 貼文詳情",
   "author": "予佟",
   "entry": "https://raw.githubusercontent.com/jiwanhe/roche_rednote/main/plugin.js",
