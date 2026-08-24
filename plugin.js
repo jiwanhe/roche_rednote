@@ -51,6 +51,7 @@
         fetchingModels: false,
         modelFetchMsg: '',
         modelFetchErr: false,
+        lastRawResponse: '',
         imported: null,   // { name, handle, avatar, coreSummary, factMemories, recentMessages, importedAt }
         importMsg: '',
         importErr: false,
@@ -174,12 +175,34 @@
 
       // ── API ──
       async function callAPI(prompt) {
-        const ep = S.cfg.mode==='roche' ? 'https://api.anthropic.com/v1/messages' : (S.cfg.endpoint||'https://api.anthropic.com/v1/messages');
+        // Roche 內建模式：走 Anthropic 原生格式
+        if (S.cfg.mode === 'roche') {
+          const headers = {'Content-Type':'application/json'};
+          if (S.cfg.apiKey) headers['Authorization'] = 'Bearer '+S.cfg.apiKey;
+          const body = {model:S.cfg.model||'claude-sonnet-4-6',max_tokens:2000,messages:[{role:'user',content:prompt}]};
+          const res = await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers,body:JSON.stringify(body)});
+          const data = await res.json().catch(()=>({}));
+          if (!res.ok) {
+            const msg = data.error?.message || data.message || JSON.stringify(data).slice(0,200) || ('HTTP ' + res.status);
+            throw new Error('API 錯誤 (' + res.status + ')：' + msg);
+          }
+          return (data.content?.map(b=>b.text||'').join(''))||'';
+        }
+
+        // 自訂 API 模式：走 OpenAI 相容格式（/chat/completions）
+        const base = (S.cfg.endpoint || '').replace(/\/+$/, '');
+        if (!base) throw new Error('尚未設定 Endpoint，請到設定裡填寫');
+        const ep = base.endsWith('/chat/completions') ? base : base + '/chat/completions';
         const headers = {'Content-Type':'application/json'};
         if (S.cfg.apiKey) headers['Authorization'] = 'Bearer '+S.cfg.apiKey;
-        const body = {model:S.cfg.model||'claude-sonnet-4-6',max_tokens:2000,messages:[{role:'user',content:prompt}]};
+        if (!S.cfg.model) throw new Error('尚未選擇 Model，請先在設定裡拉取模型或手動填寫');
+        const body = {model:S.cfg.model,messages:[{role:'user',content:prompt}],max_tokens:2000};
         const res = await fetch(ep,{method:'POST',headers,body:JSON.stringify(body)});
-        const data = await res.json();
+        const data = await res.json().catch(()=>({}));
+        if (!res.ok) {
+          const msg = data.error?.message || data.message || JSON.stringify(data).slice(0,200) || ('HTTP ' + res.status);
+          throw new Error('API 錯誤 (' + res.status + ')：' + msg);
+        }
         return (data.choices?.[0]?.message?.content)||(data.content?.map(b=>b.text||'').join(''))||'';
       }
 
@@ -213,18 +236,30 @@ ${context}
 直接回覆 JSON 陣列，不要有任何其他文字或markdown符號。`;
         try {
           const raw = await callAPI(prompt);
-          let parsed;
-          try { parsed = JSON.parse(raw.replace(/```json\n?|```\n?/g,'').trim()); } catch {
-            parsed = [
-              {title:'今日份的咖啡與陽光 ☕',content:'在街角的咖啡店，點了一杯dirty...\n\n陽光從窗外灑進來。\n\n這種不被打擾的午後，才是真正的奢侈。',tags:['咖啡日記','獨處時光','citylife'],coverEmoji:'☕',date:'3天前'},
-              {title:'深夜碎碎念 🌙',content:'又是一個失眠的夜晚。\n\n窗外的城市燈火通明，突然覺得這個世界很安靜。',tags:['深夜','碎碎念','失眠日記'],coverEmoji:'🌙',date:'1天前'},
-              {title:'本週穿搭 all black 🖤',content:'最近迷上了暗色調的搭配。\n\n黑色大衣 + 灰色高領毛衣 + 直筒褲\n簡單但很有質感。',tags:['穿搭','OOTD','極簡風'],coverEmoji:'🖤',date:'5天前'},
-            ];
+          S.lastRawResponse = raw; // 保留原始回應方便除錯
+          if (!raw || !raw.trim()) {
+            throw new Error('API 回應是空的，請檢查 Endpoint / API Key / Model 是否正確');
           }
-          const news = (Array.isArray(parsed)?parsed:[parsed]).map(p=>({...p,author:name,gradient:rg(),avatarGrad:'linear-gradient(135deg,#667eea,#764ba2)',coverH:rh(),likes:rl(),comments:rc()}));
+          let parsed;
+          try {
+            const cleaned = raw.replace(/```json\n?|```\n?/g,'').trim();
+            parsed = JSON.parse(cleaned);
+          } catch (parseErr) {
+            // 解析失敗時明確告知，不再靜默用假資料頂替
+            console.error('[小紅書] JSON 解析失敗，原始回應：', raw);
+            throw new Error('AI 回應的格式不是預期的 JSON，可能是 model 不支援或回應被截斷。原始回應前 100 字：「' + raw.slice(0,100) + '」');
+          }
+          if (!Array.isArray(parsed)) parsed = [parsed];
+          if (!parsed.length || !parsed[0] || !parsed[0].title) {
+            throw new Error('AI 回應的資料結構不對，缺少 title 欄位');
+          }
+          const news = parsed.map(p=>({...p,author:name,gradient:rg(),avatarGrad:'linear-gradient(135deg,#667eea,#764ba2)',coverH:rh(),likes:rl(),comments:rc()}));
           S.posts = [...news,...S.posts]; savePosts();
           toast('✨ 生成了 '+news.length+' 篇筆記');
-        } catch(e) { toast('生成失敗：'+e.message); }
+        } catch(e) {
+          toast('生成失敗：'+e.message);
+          console.error('[小紅書] 生成失敗：', e);
+        }
         finally { S.generating=false; render(); }
       }
 
@@ -301,8 +336,11 @@ ${context}
           const headers = {};
           if (S.cfg.apiKey) headers['Authorization'] = 'Bearer ' + S.cfg.apiKey;
           const res = await fetch(ep + '/models', { headers });
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          const data = await res.json();
+          const data = await res.json().catch(()=>({}));
+          if (!res.ok) {
+            const msg = data.error?.message || data.message || ('HTTP ' + res.status);
+            throw new Error(msg);
+          }
           const list = (data.data || data.models || []).map(m => m.id || m.name || m).filter(Boolean);
           if (!list.length) throw new Error('沒有找到可用模型');
           S.models = list;
@@ -477,7 +515,7 @@ ${context}
   window.RochePlugin.register({
     id: 'roche-xiaohongshu',
     name: '小紅書',
-    version: '2.0.1',
+    version: '2.0.2',
     description: '偷看 TA 的小紅書',
     author: '予佟',
     apps: [xhsApp]
