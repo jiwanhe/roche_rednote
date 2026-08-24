@@ -12,6 +12,43 @@
     iconImage: '',
 
     async mount(container, roche) {
+      // ── 掃描 roche 物件結構 ──
+      function inspectObj(obj, prefix, depth) {
+        if (depth > 3 || !obj) return [];
+        const results = [];
+        const seen = new Set();
+        // own properties + prototype chain
+        let cur = obj;
+        for (let d = 0; d < 3 && cur; d++) {
+          for (const key of Object.getOwnPropertyNames(cur)) {
+            if (seen.has(key) || key === 'constructor') continue;
+            seen.add(key);
+            const path = prefix ? prefix + '.' + key : key;
+            try {
+              const val = obj[key];
+              const type = typeof val;
+              if (type === 'function') {
+                results.push(path + '()');
+              } else if (type === 'object' && val !== null && !Array.isArray(val)) {
+                results.push(path + ' {object}');
+                results.push(...inspectObj(val, path, depth + 1));
+              } else if (Array.isArray(val)) {
+                results.push(path + ' [array, len=' + val.length + ']');
+              } else {
+                results.push(path + ' = ' + String(val).slice(0, 80));
+              }
+            } catch (_) {
+              results.push(path + ' (inaccessible)');
+            }
+          }
+          cur = Object.getPrototypeOf(cur);
+          if (cur === Object.prototype) break;
+        }
+        return results;
+      }
+      const _rocheAPI = inspectObj(roche, 'roche', 0);
+      console.log('[小紅書] roche API 結構：', _rocheAPI);
+
       const RED = '#FF2442', RED_L = '#FFF0F0', T1 = '#222', T2 = '#666', T3 = '#999', BD = '#F0F0F0';
       const GRADS = [
         'linear-gradient(135deg,#667eea,#764ba2)','linear-gradient(135deg,#f093fb,#f5576c)',
@@ -47,6 +84,7 @@
         lastRawResponse:'', lastError:'',
         imported: null, importMsg:'', importErr:false,
         profileTab: 'works',
+        rocheAPI: _rocheAPI,
       };
 
       // ── Storage ──
@@ -422,6 +460,11 @@ ${ctx}
         // Buttons
         h+=`<button class="xhs-s-save" data-act="save-settings">儲存設定</button>`;
         h+=`<button class="xhs-s-save" data-act="clear-all" style="background:#fff;color:${RED};border:1px solid ${RED};margin-top:8px">🗑️ 清除所有內容</button>`;
+        // Roche API 結構顯示
+        if(S.rocheAPI&&S.rocheAPI.length){
+          h+=`<label class="xhs-s-label" style="margin-top:16px;padding-top:12px;border-top:1px solid ${BD}">🔍 Roche 插件 API 結構</label>`;
+          h+=`<div style="font-size:11px;font-family:monospace;color:${T2};background:#F5F5F5;border:1px solid ${BD};border-radius:10px;padding:10px;max-height:200px;overflow-y:auto;line-height:1.6;white-space:pre-wrap">${S.rocheAPI.map(l=>esc(l)).join('\n')}</div>`;
+        }
         h+=`</div></div>`;
         return h;
       }
@@ -499,7 +542,7 @@ ${ctx}
   };
 
   window.RochePlugin.register({
-    id:'roche-xiaohongshu',name:'小紅書',version:'2.0.0',
+    id:'roche-xiaohongshu',name:'小紅書',version:'3.0.0',
     description:'偷看 TA 的小紅書',author:'予佟',
     apps:[xhsApp]
   });
