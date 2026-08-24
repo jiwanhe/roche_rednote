@@ -1,5 +1,5 @@
 /**
- * 小紅書 — Roche Plugin v2
+ * 小紅書 — Roche Plugin v3
  * 偷看 TA 的小紅書：首頁=刷到的路人貼文，我的=char自己發的
  */
 (function () {
@@ -288,80 +288,79 @@
         S.autoFetching=true; render();
         try {
           const imported = { importedAt: Date.now(), persona:'', bio:'', coreSummary:'', factMemories:[], recentMessages:[], name:'', handle:'' };
-          let charData = null;
 
-          // 1. 嘗試抓角色列表，找到當前角色
+          // 1. character.list() → [{id, name, handle, avatar}, ...]
+          let charId = null;
           try {
             const chars = await roche.character.list();
             if (chars && chars.length) {
-              // 如果有指定角色名稱，找匹配的；否則用第一個
               const target = S.cfg.charName || '';
-              charData = target ? chars.find(c => (c.name||c.handle||'') === target) || chars[0] : chars[0];
+              const match = target ? chars.find(c => c.name === target || c.handle === target) : null;
+              const picked = match || chars[0];
+              charId = picked.id;  // e.g. "c_1778213491662"
+              imported.name = picked.name || picked.handle || '角色';
+              imported.handle = picked.handle || picked.name || '';
             }
           } catch(_){}
 
-          // 2. 如果 list 拿到了角色，嘗試 get 取完整資料
-          if (charData) {
-            const charId = charData.id || charData.contactId || charData.handle;
-            if (charId) {
-              try {
-                const full = await roche.character.get(charId);
-                if (full) charData = full;
-              } catch(_){}
-            }
-            imported.name = charData.name || charData.handle || '角色';
-            imported.handle = charData.handle || charData.name || '';
-            imported.persona = charData.persona || charData.description || charData.systemPrompt || '';
-            imported.bio = charData.bio || charData.greeting || '';
+          // 2. character.get(id) → 完整角色資料（含 persona, bio）
+          if (charId) {
+            try {
+              const full = await roche.character.get(charId);
+              if (full) {
+                imported.persona = full.persona || full.description || '';
+                imported.bio = full.bio || '';
+                if (!imported.name) imported.name = full.name || full.handle || '';
+              }
+            } catch(_){}
           }
 
-          // 3. 抓長期記憶
+          // 3. memory.getLongTerm() → { core: [{conversationId, summary, lastUpdatedAt}], facts: [{who, action, ...}] }
           try {
             const ltm = await roche.memory.getLongTerm();
             if (ltm) {
-              // 可能是 { summary, factMemories } 或直接是陣列
-              if (typeof ltm === 'string') {
-                imported.coreSummary = ltm;
-              } else if (ltm.summary) {
-                imported.coreSummary = ltm.summary;
+              // core → 取所有 core 的 summary 合併（可能有多個 conversation 的摘要）
+              if (ltm.core && Array.isArray(ltm.core) && ltm.core.length) {
+                imported.coreSummary = ltm.core.map(c => c.summary || '').filter(Boolean).join('\n\n');
               }
-              if (ltm.factMemories && Array.isArray(ltm.factMemories)) {
-                imported.factMemories = ltm.factMemories.slice(0,8).map(f => f.summaryText || f.action || String(f)).filter(Boolean);
-              } else if (Array.isArray(ltm)) {
-                imported.factMemories = ltm.slice(0,8).map(f => typeof f === 'string' ? f : (f.summaryText || f.action || JSON.stringify(f).slice(0,120))).filter(Boolean);
+              // facts → 取 action 欄位
+              if (ltm.facts && Array.isArray(ltm.facts)) {
+                imported.factMemories = ltm.facts
+                  .slice(0, 10)
+                  .map(f => f.action || f.summaryText || '')
+                  .filter(Boolean)
+                  .map(t => t.length > 200 ? t.slice(0, 200) + '…' : t);
               }
             }
           } catch(_){}
 
-          // 4. 抓短期記憶（近期對話）
+          // 4. memory.getShortTerm() → [{id, text, senderId, senderName, isMe, timestamp, ...}]
           try {
             const stm = await roche.memory.getShortTerm();
             if (stm && Array.isArray(stm)) {
               imported.recentMessages = stm
-                .filter(m => !m.isMe && (m.text || m.content))
+                .filter(m => !m.isMe && m.text)
                 .slice(-20)
-                .map(m => m.text || m.content || '');
-            } else if (typeof stm === 'string') {
-              imported.coreSummary = imported.coreSummary || stm;
+                .map(m => m.text);
             }
           } catch(_){}
 
-          // 5. 合併到 S.imported
+          // 5. 寫入
           if (imported.name || imported.persona || imported.coreSummary || imported.factMemories.length) {
             S.imported = imported;
             await saveImported();
             if (!S.cfg.charName && imported.name) S.cfg.charName = imported.name;
-            toast('✨ 自動抓取成功：' + (imported.name || '角色'));
-            S.importMsg = `已自動抓取「${imported.name}」：角色卡 ${imported.persona?'✓':'✕'}　記憶 ${imported.factMemories.length}筆　語氣 ${imported.recentMessages.length}則`;
+            toast('✨ 自動抓取成功：' + imported.name);
+            S.importMsg = `已抓取「${imported.name}」：人設 ${imported.persona?'✓':'✕'}（${imported.persona.length}字）　摘要 ${imported.coreSummary?'✓':'✕'}　記憶 ${imported.factMemories.length}筆　語氣 ${imported.recentMessages.length}則`;
             S.importErr = false;
           } else {
-            toast('⚠ 沒有抓到資料，請確認角色是否存在');
-            S.importMsg = '自動抓取未取得資料，可能需要先開啟一個角色對話';
+            toast('⚠ 沒有抓到資料');
+            S.importMsg = '未取得資料，請確認已開啟角色對話';
             S.importErr = true;
           }
         } catch(e) {
           toast('⚠ 抓取失敗：' + e.message);
-          S.importMsg = '自動抓取失敗：' + e.message;
+          S.importMsg = '抓取失敗：' + e.message;
           S.importErr = true;
         }
         S.autoFetching = false;
@@ -374,18 +373,12 @@
         if(sysMsg) msgs.push({role:'system',content:sysMsg});
         msgs.push({role:'user',content:prompt});
         if(S.cfg.mode==='roche'){
-          // 使用 Roche 內建的 AI 呼叫，不需要自己填 API key
           try {
             const result = await roche.ai.chat({ messages: msgs, max_tokens: 8000 });
-            // result 可能是字串、物件、或帶 content 的回應
-            if (typeof result === 'string') return result;
-            if (result && result.content) {
-              if (Array.isArray(result.content)) return result.content.map(b=>b.text||'').join('');
-              return String(result.content);
-            }
-            if (result && result.text) return result.text;
-            if (result && result.choices) return result.choices[0]?.message?.content || '';
-            return JSON.stringify(result);
+            // 回傳格式：OpenAI 相容，有 choices[0].message.content 和 text 捷徑
+            if (!result) throw new Error('回應為空');
+            // 優先用 text 捷徑，其次 choices
+            return result.text || result.choices?.[0]?.message?.content || (typeof result === 'string' ? result : '');
           } catch(e) {
             throw new Error('roche.ai.chat() 失敗：' + e.message);
           }
@@ -676,7 +669,7 @@ ${ctx}
   };
 
   window.RochePlugin.register({
-    id:'roche-xiaohongshu',name:'小紅書',version:'2.1.1',
+    id:'roche-xiaohongshu',name:'小紅書',version:'3.0.1',
     description:'偷看 TA 的小紅書',author:'予佟',
     apps:[xhsApp]
   });
