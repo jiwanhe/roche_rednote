@@ -194,6 +194,7 @@
       }
 
       // ── Build char context for prompts ──
+      // 完整版（char 自己發文用）
       function buildCharContext(){
         const im=S.imported; if(!im) return '';
         let ctx='';
@@ -203,13 +204,26 @@
         if(im.recentMessages&&im.recentMessages.length) ctx+=`\n【角色說話語氣（原話片段）】\n${im.recentMessages.slice(-10).map(t=>'- '+t).join('\n')}\n`;
         return ctx;
       }
+      // 精簡版（NPC 推薦用，只需要知道角色興趣和近況就好，不需要完整人設）
+      function buildCharContextLite(){
+        const im=S.imported; if(!im) return '';
+        let ctx='';
+        // 只取 persona 前 600 字（性格和愛好部分），避免 prompt 太長
+        if(im.persona) ctx+=`\n【角色個性與興趣摘要】\n${im.persona.slice(0,600)}\n`;
+        if(im.coreSummary) ctx+=`\n【角色近況】\n${im.coreSummary.slice(0,400)}\n`;
+        if(im.factMemories&&im.factMemories.length) ctx+=`\n【最近發生的事】\n${im.factMemories.slice(0,4).map((f,i)=>`${i+1}. ${f.slice(0,120)}`).join('\n')}\n`;
+        return ctx;
+      }
 
       // ── API ──
-      async function callAPI(prompt){
+      async function callAPI(prompt, sysMsg){
+        const msgs = [];
+        if(sysMsg) msgs.push({role:'system',content:sysMsg});
+        msgs.push({role:'user',content:prompt});
         if(S.cfg.mode==='roche'){
           const h={'Content-Type':'application/json'};
           if(S.cfg.apiKey)h['Authorization']='Bearer '+S.cfg.apiKey;
-          const body={model:S.cfg.model||'claude-sonnet-4-6',max_tokens:3000,messages:[{role:'user',content:prompt}]};
+          const body={model:S.cfg.model||'claude-sonnet-4-6',max_tokens:8000,messages:msgs};
           const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:h,body:JSON.stringify(body)});
           const data=await res.json().catch(()=>({}));
           if(!res.ok)throw new Error('API 錯誤 ('+res.status+')：'+(data.error?.message||data.message||JSON.stringify(data).slice(0,200)));
@@ -221,7 +235,7 @@
         const h={'Content-Type':'application/json'};
         if(S.cfg.apiKey)h['Authorization']='Bearer '+S.cfg.apiKey;
         if(!S.cfg.model)throw new Error('尚未選擇 Model');
-        const body={model:S.cfg.model,messages:[{role:'user',content:prompt}],max_tokens:3000};
+        const body={model:S.cfg.model,messages:msgs,max_tokens:8000};
         const res=await fetch(ep,{method:'POST',headers:h,body:JSON.stringify(body)});
         const data=await res.json().catch(()=>({}));
         if(!res.ok)throw new Error('API 錯誤 ('+res.status+')：'+(data.error?.message||data.message||JSON.stringify(data).slice(0,200)));
@@ -261,37 +275,22 @@
         S.generating=true;S.lastError='';render();
         const name=charName();
         const count=parseInt(S.cfg.genCount)||5;
-        const ctx=buildCharContext();
-        const prompt=`你現在要模擬小紅書的推薦頁面，生成 ${count} 篇貼文。這些是「${name}」刷小紅書時會看到的各種路人網友的真實貼文。
+        const ctx=buildCharContextLite();
 
-${ctx?`以下是「${name}」的資料，用來決定推薦算法會推什麼內容給TA（部分貼文要踩中TA的興趣點）：\n${ctx}`:''}
+        const sysMsg=`你是一個小紅書貼文模擬器。你的任務是生成像真實小紅書用戶寫的貼文。
+規則：
+- 語氣必須像真正的小紅書網友：口語化、自嘲、吐槽、誇張但接地氣
+- 善用流行語（姐妹們我真的會謝、救命、絕了、DNA動了、離大譜、笑不活了、家人們誰懂啊、不是哥們等）
+- 標題用小紅書特色格式（震驚體、反問體、踩雷體）
+- 正文短句、頻繁換行、emoji穿插但不過度、打字有隨意感（哈哈哈哈哈、？？？、嗚嗚嗚）
+- 每篇由不同路人帳號發出，暱稱要有個性（像「加班到禿頭的打工人」「奶茶續命中」）
+- 類型混搭：美食踩雷種草、社死現場、職場吐槽、搞笑日常、冷知識、租房裝修、健身掙扎、深夜emo帶自嘲、旅行探店、追劇遊戲、時事吐槽
+- 只回覆 JSON 陣列，不要有任何其他文字或解釋
+- 格式：[{"author":"暱稱","title":"標題","content":"正文","tags":["標籤"],"coverEmoji":"emoji","date":"時間"}]`;
 
-【最重要】語氣和風格必須像真正的小紅書網友，不是 Instagram 網紅也不是微博大V：
-- 用真實小紅書用戶的說話方式：口語化、自嘲、吐槽、誇張但接地氣
-- 善用小紅書流行語和網路用語（例如：姐妹們我真的會謝、救命、絕了、DNA動了、離大譜、好嗑、上頭、破防了、笑不活了、泰褲辣、真的栓Q了、家人們誰懂啊、不是哥們、我直接一個xxx）
-- 標題要有小紅書特色：震驚體、反問體、數字體、踩雷體都行（「天吶這個也太xxx了吧」「求求你們別再xxx了」「看到第3個我直接破防」「姐妹們我瘋了！！！」）
-- 正文用短句、頻繁換行、emoji穿插但不過度、像在跟好朋友聊天
-- 可以有些打字隨意感（「哈哈哈哈哈哈」「？？？」「啊啊啊啊」「嗚嗚嗚」）
-
-內容類型要混搭（每篇不同類型），從以下隨機挑選：
-- 🍜 美食踩雷/種草（「這家店我願意排兩小時」「求你們別去xx路那家了」）
-- 💀 社死現場實錄（「剛才在電梯裡做了一件事，我想原地消失」）
-- 😤 職場/生活吐槽（「領導今天又說了句讓我想離職的話」「房東我真的謝謝你」）
-- 🤣 搞笑日常/段子（沙雕寵物、離譜經歷、迷惑行為大賞）
-- 💡 冷知識/震驚發現（「活了xx年才知道原來xxx」）
-- 🏠 租房/裝修/生活好物（實用但帶吐槽）
-- 💪 健身/減肥的掙扎（「第一天：我要瘦！第三天：火鍋真香」）
-- 🌙 深夜emo（但要帶點自嘲不要太矯情）
-- 📸 旅行/探店（真實體驗不是廣告）
-- 🎮 追劇/遊戲/ACG（「這部劇看得我血壓飆升」）
-- 時事吐槽（不涉及敏感政治，聊日常現象就好）
-
-每篇需要：author（有趣的路人暱稱，像「加班到禿頭的打工人」「奶茶續命中」「貓奴本奴」這種有個性的）、title、content（150-300字）、tags（3-5個）、coverEmoji、date（「剛剛」「1小時前」「昨天」「3天前」等）
-
-直接回覆 JSON 陣列，不要有任何其他文字。格式：
-[{"author":"暱稱","title":"...","content":"...","tags":["..."],"coverEmoji":"...","date":"..."}]`;
+        const prompt=`生成 ${count} 篇小紅書推薦頁貼文。${ctx?`\n以下是刷小紅書的這個人的資料，部分貼文要踩中TA的興趣：\n${ctx}`:''}`;
         try{
-          const raw=await callAPI(prompt);S.lastRawResponse=raw;
+          const raw=await callAPI(prompt,sysMsg);S.lastRawResponse=raw;
           if(!raw||!raw.trim())throw new Error('API 回應是空的');
           let parsed=parseJSON(raw);
           if(!parsed)throw new Error('無法解析 JSON。回應前 120 字：「'+raw.slice(0,120)+'…」');
@@ -500,7 +499,7 @@ ${ctx}
   };
 
   window.RochePlugin.register({
-    id:'roche-xiaohongshu',name:'小紅書',version:'5.0.0',
+    id:'roche-xiaohongshu',name:'小紅書',version:'2.0.0',
     description:'偷看 TA 的小紅書',author:'予佟',
     apps:[xhsApp]
   });
