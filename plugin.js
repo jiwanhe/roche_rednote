@@ -34,6 +34,7 @@ const xhsApp={
       lastError:'',
       profileTab:'works',
       autoFetching:false,
+      generatingComments:false,
     };
 
     // ── Storage ──
@@ -119,6 +120,19 @@ const xhsApp={
       .xr-dt-tags span{font-size:12px;color:#3478F6;background:#EEF4FF;padding:3px 8px;border-radius:4px}
       .xr-dt-acts{display:flex;gap:18px;margin-top:18px;padding-top:14px;border-top:1px solid ${BD}}
       .xr-act{display:flex;align-items:center;gap:4px;background:none;border:none;cursor:pointer;font-size:12px;color:${T3}}
+      .xr-cm-sec{margin-top:18px;padding-top:14px;border-top:1px solid ${BD}}
+      .xr-cm-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+      .xr-cm-hdr span{font-size:13px;font-weight:700;color:${T1}}
+      .xr-cm-item{display:flex;gap:8px;margin-bottom:14px}
+      .xr-cm-av{width:32px;height:32px;border-radius:50%;flex-shrink:0}
+      .xr-cm-body{flex:1;min-width:0}
+      .xr-cm-name{font-size:12px;color:${T3};margin-bottom:2px}
+      .xr-cm-text{font-size:13.5px;color:${T1};line-height:1.5}
+      .xr-cm-meta{display:flex;align-items:center;gap:12px;margin-top:4px}
+      .xr-cm-meta span{font-size:11px;color:${T3}}
+      .xr-cm-like{display:flex;align-items:center;gap:3px;background:none;border:none;cursor:pointer;color:${T3}}
+      .xr-cm-reply{margin-top:8px;margin-left:8px;padding-left:10px;border-left:2px solid ${BD}}
+      .xr-cm-gen-btn{width:100%;padding:9px 0;border-radius:16px;background:${RED_L};color:${RED};border:1px solid ${RED}30;font-weight:600;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px}
       .xr-mask{position:absolute;inset:0;z-index:200;background:rgba(0,0,0,.45);display:flex;align-items:flex-end}
       .xr-set{width:100%;background:#fff;border-radius:16px 16px 0 0;padding:18px;max-height:80%;overflow-y:auto}
       .xr-set-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
@@ -270,6 +284,40 @@ const xhsApp={
       S.generating=false;render();
     }
 
+    // ═══ 生成：貼文的評論區 ═══
+    const SYS_COMMENTS=`你是小紅書評論區模擬器。針對一篇貼文生成一批真實網友的留言。
+規則：
+- 留言要像真實小紅書評論：短、口語化、有梗、有互相調侃
+- 混合類型：附和共鳴（"啊啊啊我也是"）、抬槓吐槽、玩梗接龍、求連結/求教程、關心提問、陰陽怪氣但不惡毒、簡短誇獎、歪樓神評
+- 長度差異大：有些留言只有幾個字（"笑死"、"救命"、"樓主好美"），有些長一點
+- 部分留言可以有 1-2 則簡短回覆（樓中樓），製造互動感
+- 每則留言需要：author（暱稱）、text（留言內容）、likes（數字，多數個位數到兩位數，少數可以破百）
+- 部分留言可以有 replies 陣列（0-2則回覆），每則回覆同樣有 author、text、likes
+- 只回 JSON 陣列，不要任何其他文字
+- 格式：[{"author":"暱稱","text":"留言","likes":12,"replies":[{"author":"暱稱","text":"回覆","likes":3}]}]`;
+
+    async function genComments(post){
+      if(S.generatingComments)return;
+      S.generatingComments=true;render();
+      const isMine=S.myPosts.includes(post);
+      const n=charName();
+      const p=`貼文標題：「${post.title}」\n貼文內容：${post.content}\n${isMine?`\n這是「${n}」自己發的貼文。生成的留言裡，可以讓 1-2 則路人留言得到「${n}」本人的簡短回覆（回覆時 author 直接寫「${n}」，語氣要符合TA本人）。`:''}\n生成 6-10 則留言。`;
+      try{
+        const raw=await callAI(p,SYS_COMMENTS);
+        let arr=parseJSON(raw);
+        if(!arr||!Array.isArray(arr))throw new Error('留言解析失敗');
+        post.commentList=arr;
+        // 更新 comments 數字為實際留言數（含回覆）
+        post.comments=arr.reduce((sum,c)=>sum+1+((c.replies||[]).length),0);
+        // 存回對應的陣列
+        if(S.feedPosts.includes(post))saveFeed();
+        else if(S.myPosts.includes(post))saveMine();
+        else if(S.savedPosts.includes(post))saveSaved();
+        toast('💬 生成了 '+arr.length+' 則留言');
+      }catch(e){toast('⚠ 留言生成失敗：'+e.message);}
+      S.generatingComments=false;render();
+    }
+
     // ── Render ──
     const root=document.createElement('div');root.className='xr';container.appendChild(root);
     function render(){
@@ -322,11 +370,23 @@ const xhsApp={
       return h;
     }
 
+    function commentHTML(c){
+      return `<div class="xr-cm-item"><div class="xr-cm-av" style="background:${rNpcG()}"></div><div class="xr-cm-body"><div class="xr-cm-name">${esc(c.author)}</div><div class="xr-cm-text">${esc(c.text)}</div><div class="xr-cm-meta"><span>${Math.floor(Math.random()*20)+1}小時前</span><button class="xr-cm-like">${I.heart(false,12)}<span>${c.likes||0}</span></button></div>${(c.replies||[]).length?`<div class="xr-cm-reply">${c.replies.map(r=>`<div class="xr-cm-item" style="margin-bottom:8px"><div class="xr-cm-av" style="width:24px;height:24px;background:${rNpcG()}"></div><div class="xr-cm-body"><div class="xr-cm-name">${esc(r.author)}</div><div class="xr-cm-text" style="font-size:12.5px">${esc(r.text)}</div><div class="xr-cm-meta"><button class="xr-cm-like">${I.heart(false,11)}<span>${r.likes||0}</span></button></div></div></div>`).join('')}</div>`:''}</div></div>`;
+    }
+
     function vDetail(p){
       const src=S.feedPosts.includes(p)?'feed':S.myPosts.includes(p)?'mine':'saved';
       const idx=src==='feed'?S.feedPosts.indexOf(p):src==='mine'?S.myPosts.indexOf(p):S.savedPosts.indexOf(p);
       const k=src[0]+idx,liked=S.liked[k];
-      return `<div class="xr-dt"><div class="xr-hdr" style="border-bottom:1px solid ${BD}"><button class="xr-hdr-btn" data-a="close-dt">${I.back}</button><div style="display:flex;align-items:center;gap:6px"><div style="width:26px;height:26px;border-radius:50%;background:${p.avatarGrad||'#ddd'}"></div><span style="font-size:13px;font-weight:600">${esc(p.author)}</span></div><button style="background:${RED};color:#fff;border:none;border-radius:14px;padding:4px 14px;font-size:12px;font-weight:600;cursor:pointer">關注</button></div><div class="xr-dt-cover" style="background:${p.gradient}">${p.coverEmoji?`<span style="font-size:64px;opacity:.5">${p.coverEmoji}</span>`:''}</div><div class="xr-dt-body"><h2>${esc(p.title)}</h2><div class="ct">${esc(p.content)}</div>${p.tags?.length?`<div class="xr-dt-tags">${p.tags.map(t=>`<span>#${esc(t)}</span>`).join('')}</div>`:''}<div style="font-size:12px;color:${T3};margin-top:12px">${esc(p.date||'')}</div><div class="xr-dt-acts"><button class="xr-act" data-a="like" data-k="${k}">${I.heart(liked,18)}<span style="color:${liked?RED:T3}">${liked?p.likes+1:p.likes}</span></button><button class="xr-act">${I.comment}<span>${p.comments||0}</span></button><button class="xr-act">${I.share}<span>分享</span></button></div></div></div>`;
+      let commentsHTML=`<div class="xr-cm-sec"><div class="xr-cm-hdr"><span>💬 共 ${p.comments||0} 條評論</span></div>`;
+      if(p.commentList&&p.commentList.length){
+        commentsHTML+=p.commentList.map(c=>commentHTML(c)).join('');
+        commentsHTML+=`<button class="xr-cm-gen-btn" data-a="gen-comments" data-s="${src}" data-i="${idx}" ${S.generatingComments?'disabled':''}>${S.generatingComments?'⏳ 生成中...':I.refresh+' 重新生成留言'}</button>`;
+      }else{
+        commentsHTML+=`<button class="xr-cm-gen-btn" data-a="gen-comments" data-s="${src}" data-i="${idx}" ${S.generatingComments?'disabled':''}>${S.generatingComments?'⏳ 生成留言中...':'💬 生成評論區'}</button>`;
+      }
+      commentsHTML+=`</div>`;
+      return `<div class="xr-dt"><div class="xr-hdr" style="border-bottom:1px solid ${BD}"><button class="xr-hdr-btn" data-a="close-dt">${I.back}</button><div style="display:flex;align-items:center;gap:6px"><div style="width:26px;height:26px;border-radius:50%;background:${p.avatarGrad||'#ddd'}"></div><span style="font-size:13px;font-weight:600">${esc(p.author)}</span></div><button style="background:${RED};color:#fff;border:none;border-radius:14px;padding:4px 14px;font-size:12px;font-weight:600;cursor:pointer">關注</button></div><div class="xr-dt-cover" style="background:${p.gradient}">${p.coverEmoji?`<span style="font-size:64px;opacity:.5">${p.coverEmoji}</span>`:''}</div><div class="xr-dt-body"><h2>${esc(p.title)}</h2><div class="ct">${esc(p.content)}</div>${p.tags?.length?`<div class="xr-dt-tags">${p.tags.map(t=>`<span>#${esc(t)}</span>`).join('')}</div>`:''}<div style="font-size:12px;color:${T3};margin-top:12px">${esc(p.date||'')}</div><div class="xr-dt-acts"><button class="xr-act" data-a="like" data-k="${k}">${I.heart(liked,18)}<span style="color:${liked?RED:T3}">${liked?p.likes+1:p.likes}</span></button><button class="xr-act">${I.comment}<span>${p.comments||0}</span></button><button class="xr-act">${I.share}<span>分享</span></button></div>${commentsHTML}</div></div>`;
     }
 
     function vSettings(){
@@ -370,6 +430,11 @@ const xhsApp={
         if(!isNaN(i)&&list[i]){S.detail=list[i];render();}
       }
       else if(a==='close-dt'){S.detail=null;render();}
+      else if(a==='gen-comments'){
+        const s=b.dataset.s,i=parseInt(b.dataset.i);
+        const list=s==='feed'?S.feedPosts:s==='mine'?S.myPosts:S.savedPosts;
+        if(!isNaN(i)&&list[i])genComments(list[i]);
+      }
       else if(a==='like'){const k=b.dataset.k;S.liked[k]=!S.liked[k];render();}
       else if(a==='fetch-char'){
         // 先把下拉選項同步到 cfg
@@ -402,5 +467,5 @@ const xhsApp={
   }
 };
 
-window.RochePlugin.register({id:'roche-xiaohongshu',name:'小紅書',version:'3.0.2',description:'偷看 TA 的小紅書',author:'予佟',apps:[xhsApp]});
+window.RochePlugin.register({id:'roche-xiaohongshu',name:'小紅書',version:'3.0.5',description:'偷看 TA 的小紅書',author:'予佟',apps:[xhsApp]});
 })();
