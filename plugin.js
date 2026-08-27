@@ -10,7 +10,7 @@
 (function(){
 'use strict';
 const xhsApp={
-  id:'xiaohongshu-home',name:'小紅書',icon:'auto_stories',iconImage:'',
+  id:'xiaohongshu-home',name:'小紅書',icon:'photo_camera',iconImage:'',
 
   async mount(container,roche){
     const RED='#FF2442',RED_L='#FFF0F0',T1='#222',T2='#666',T3='#999',BD='#F0F0F0';
